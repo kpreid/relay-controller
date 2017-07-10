@@ -8,6 +8,8 @@ enum position {
 };
 
 class channel_config {
+  public:
+  
   const int pin_coil_pos1, pin_coil_pos2;
   const int pin_indicator_pos1, pin_indicator_pos2;
   const char key;
@@ -28,6 +30,8 @@ class channel_config {
 };
 
 class channel_state {
+  public:
+
   const channel_config conf;
   int last_seen_position;
 
@@ -51,8 +55,8 @@ class channel_state {
   }
 
   bool read_indicators() {
-    p1 = !digitalRead(pin_indicator_pos1);
-    p2 = !digitalRead(pin_indicator_pos2);
+    const bool p1 = !digitalRead(conf.pin_indicator_pos1);
+    const bool p2 = !digitalRead(conf.pin_indicator_pos2);
     position new_position;
     if (p1 && !p2) {
       new_position = POS_1;
@@ -91,7 +95,7 @@ void setup() {
 }
 
 channel_state *serial_channel = NULL;
-position *serial_position = POS_FAULT;
+position serial_position = POS_FAULT;
 
 void loop() {
   for (auto& c : the_state) {
@@ -101,9 +105,9 @@ void loop() {
     int symbol = Serial.read();
     switch (symbol) {
       // TODO: Change position numbering to match relay label
-      case 'A': serial_channel = &channels[0]; break;
-      case 'B': serial_channel = &channels[1]; break;
-      case 'C': serial_channel = &channels[2]; break;
+      case 'A': serial_channel = &the_state[0]; break;
+      case 'B': serial_channel = &the_state[1]; break;
+      case 'C': serial_channel = &the_state[2]; break;
       case '0': serial_position = POS_1; break;
       case '1': serial_position = POS_2; break;
       case ';':
