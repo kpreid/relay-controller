@@ -15,9 +15,14 @@ class channel_config {
   const char key;
 
   void drive_coil(position p) {
-    int pin = p ? pin_coil_pos2 : pin_coil_pos1;
+    int pin = pin_coil_pos1;
+    switch (p) {
+      case POS_1: pin = pin_coil_pos1; break;
+      case POS_2: pin = pin_coil_pos2; break;
+      default: Serial.write("BAD_DRIVE;"); return;
+    }
     digitalWrite(pin, HIGH);
-    delay(10);
+    delay(20);
     digitalWrite(pin, LOW);
   }
 
@@ -35,26 +40,23 @@ class channel_state {
   const channel_config conf;
   int last_seen_position;
 
-  // Returns whether a change was observed.
-  bool set(position p) {
+  void set(position p) {
     bool changed = false;
     if (last_seen_position != p) {
-      last_seen_position = p;
       conf.drive_coil(p);
       changed = true;
     }
     // drive_coil blocks so we should get a good reading.
     // Though in principle the pulse might take less time than the state change.
-    return read_indicators();
-    // TODO: Distinguish "no-op" from "failed to change".
+    read_indicators(true);
   }
 
   void setup() {
     conf.setup();
-    read_indicators();
+    read_indicators(true);
   }
 
-  bool read_indicators() {
+  void read_indicators(bool always_report) {
     const bool p1 = !digitalRead(conf.pin_indicator_pos1);
     const bool p2 = !digitalRead(conf.pin_indicator_pos2);
     position new_position;
@@ -67,14 +69,18 @@ class channel_state {
     } else {
       new_position = POS_FAULT;
     }
-    if (new_position != last_seen_position) {
+    if (new_position != last_seen_position || always_report) {
       last_seen_position = new_position;
+      char code;
+      switch (last_seen_position) {
+        case POS_UNPLUGGED: code = 'U'; break;
+        case POS_FAULT: code = 'F'; break;
+        case POS_1: code = '1'; break;
+        case POS_2: code = '2'; break;
+      }
       Serial.write(conf.key);
-      Serial.print(last_seen_position);
+      Serial.write(code);
       Serial.write(';');
-      return true;
-    } else {
-      return false;
     }
   }
 };
@@ -85,42 +91,57 @@ static channel_state the_state[CHANNELS] = {
   {{12, 13,  6,  7, 'C'}, POS_FAULT},
 };
 
+class command_parser {
+  channel_state *cmd_channel = NULL;
+  position cmd_position = POS_FAULT;
+
+  public:
+
+  void clear() {
+    cmd_channel = NULL;
+    cmd_position = POS_FAULT;
+  }
+
+  void check() {
+    if (Serial.available() > 0) {
+      int symbol = Serial.read();
+      switch (symbol) {
+        case 'A': cmd_channel = &the_state[0]; break;
+        case 'B': cmd_channel = &the_state[1]; break;
+        case 'C': cmd_channel = &the_state[2]; break;
+        case '1': cmd_position = POS_1; break;
+        case '2': cmd_position = POS_2; break;
+        case ';':
+          if (cmd_channel == NULL || cmd_position == POS_FAULT) {
+            Serial.write("INCOMPLETE_COMMAND;");
+          } else {
+            cmd_channel->set(cmd_position);
+          }
+          break;
+        default:
+          Serial.write("BAD_CHARACTER;");
+          clear();
+          break;
+      }
+    }
+  }
+};
+
+static command_parser the_parser;
+
 void setup() {
+  Serial.begin(115200);
   Serial.write("BOOTING;");
   for (auto& c : the_state) {
     c.setup();
   }
-  Serial.begin(115200);
   Serial.write("READY;");
 }
 
-channel_state *serial_channel = NULL;
-position serial_position = POS_FAULT;
-
 void loop() {
   for (auto& c : the_state) {
-    c.read_indicators();
+    c.read_indicators(false);
   }
-  if (Serial.available() > 0) {
-    int symbol = Serial.read();
-    switch (symbol) {
-      // TODO: Change position numbering to match relay label
-      case 'A': serial_channel = &the_state[0]; break;
-      case 'B': serial_channel = &the_state[1]; break;
-      case 'C': serial_channel = &the_state[2]; break;
-      case '0': serial_position = POS_1; break;
-      case '1': serial_position = POS_2; break;
-      case ';':
-        if (serial_channel == NULL || serial_position == POS_FAULT) {
-          Serial.write("BAD_COMMAND;");
-        } else {
-          bool changed = serial_channel->set(serial_position);
-          Serial.write(changed ? "" : "NOP;");
-        }
-        break;
-      default:
-        Serial.write("BAD_CHARACTER;");
-    }
-  }
+  the_parser.check();
 }
 
