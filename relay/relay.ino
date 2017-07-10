@@ -1,98 +1,121 @@
-#define DRIVER_STBY 4
-#define DRIVER_AIN1 3
-#define DRIVER_AIN2 2
-#define DRIVER_BIN1 5
-#define DRIVER_BIN2 6
-#define ST_LED1 13
+#define CHANNELS 3
 
-#define SWITCH_A1 8
-#define SWITCH_A2 9
-#define SWITCH_B1 10
-#define SWITCH_B2 11
+enum position {
+  POS_FAULT = -1,
+  POS_UNPLUGGED = 0,
+  POS_1 = 1,
+  POS_2 = 2,
+};
 
-static void driver_send(bool which, bool state) {
-  digitalWrite(which ? DRIVER_BIN1 : DRIVER_AIN1, state ? HIGH : LOW);
-  digitalWrite(which ? DRIVER_BIN2 : DRIVER_AIN2, state ? LOW : HIGH);
-  // other remains hiZ
-  digitalWrite(which ? DRIVER_AIN1 : DRIVER_BIN1, LOW);
-  digitalWrite(which ? DRIVER_AIN2 : DRIVER_BIN2, LOW);
-
-  digitalWrite(DRIVER_STBY, 1);
-  digitalWrite(ST_LED1, 1);
-  delay(10);
-  digitalWrite(DRIVER_STBY, 0);
-  digitalWrite(ST_LED1, 0);
-}
-
-struct relay {
-  const int which;
+class channel_config {
+  const int pin_coil_pos1, pin_coil_pos2;
+  const int pin_indicator_pos1, pin_indicator_pos2;
   const char key;
-  int curState;
 
-  bool set(bool state) {
-    bool changed = false;
-    if (curState != state) {
-      curState = state;
-      driver_send(which, curState);
-      changed = true;
-    }
-    // Report new state unconditionally for consistent results.
-    Serial.write(key);
-    Serial.print(curState);
-    Serial.write(';');
-    return changed;
+  void drive_coil(position p) {
+    int pin = p ? pin_coil_pos2 : pin_coil_pos1;
+    digitalWrite(pin, HIGH);
+    delay(10);
+    digitalWrite(pin, LOW);
+  }
+
+  void setup() {
+    pinMode(pin_coil_pos1, OUTPUT);
+    pinMode(pin_coil_pos2, OUTPUT);
+    pinMode(pin_indicator_pos1, INPUT_PULLUP);
+    pinMode(pin_indicator_pos2, INPUT_PULLUP);
   }
 };
 
-static relay relays[] = {
-  {0, 'A', -1},
-  {1, 'B', -1},
+class channel_state {
+  const channel_config conf;
+  int last_seen_position;
+
+  // Returns whether a change was observed.
+  bool set(position p) {
+    bool changed = false;
+    if (last_seen_position != p) {
+      last_seen_position = p;
+      conf.drive_coil(p);
+      changed = true;
+    }
+    // drive_coil blocks so we should get a good reading.
+    // Though in principle the pulse might take less time than the state change.
+    return read_indicators();
+    // TODO: Distinguish "no-op" from "failed to change".
+  }
+
+  void setup() {
+    conf.setup();
+    read_indicators();
+  }
+
+  bool read_indicators() {
+    p1 = !digitalRead(pin_indicator_pos1);
+    p2 = !digitalRead(pin_indicator_pos2);
+    position new_position;
+    if (p1 && !p2) {
+      new_position = POS_1;
+    } else if (p2 && !p1) {
+      new_position = POS_2;
+    } else if (!p1 && !p2) {
+      new_position = POS_UNPLUGGED;
+    } else {
+      new_position = POS_FAULT;
+    }
+    if (new_position != last_seen_position) {
+      last_seen_position = new_position;
+      Serial.write(conf.key);
+      Serial.print(last_seen_position);
+      Serial.write(';');
+      return true;
+    } else {
+      return false;
+    }
+  }
+};
+
+static channel_state the_state[CHANNELS] = {
+  {{ 8,  9,  2,  3, 'A'}, POS_FAULT},
+  {{10, 11,  4,  5, 'B'}, POS_FAULT},
+  {{12, 13,  6,  7, 'C'}, POS_FAULT},
 };
 
 void setup() {
-  pinMode(DRIVER_STBY, OUTPUT);
-  pinMode(DRIVER_AIN1, OUTPUT);
-  pinMode(DRIVER_AIN2, OUTPUT);
-  pinMode(DRIVER_BIN1, OUTPUT);
-  pinMode(DRIVER_BIN2, OUTPUT);
-
-  pinMode(ST_LED1, OUTPUT);
-
-  pinMode(SWITCH_A1, INPUT_PULLUP);
-  pinMode(SWITCH_A2, INPUT_PULLUP);
-  pinMode(SWITCH_B1, INPUT_PULLUP);
-  pinMode(SWITCH_B2, INPUT_PULLUP);
-
-  relays[0].set(1);
-  relays[1].set(1);
-
+  Serial.write("BOOTING;");
+  for (auto& c : the_state) {
+    c.setup();
+  }
   Serial.begin(115200);
   Serial.write("READY;");
 }
 
-bool serWhich = 0;
-bool serState = 0;
+channel_state *serial_channel = NULL;
+position *serial_position = POS_FAULT;
 
 void loop() {
-  // TODO: If any switch input is active, ignore opposing serial commands.
-  if (!digitalRead(SWITCH_A1)) { relays[0].set(0); }
-  if (!digitalRead(SWITCH_A2)) { relays[0].set(1); }
-  if (!digitalRead(SWITCH_B1)) { relays[1].set(0); }
-  if (!digitalRead(SWITCH_B2)) { relays[1].set(1); }
+  for (auto& c : the_state) {
+    c.read_indicators();
+  }
   if (Serial.available() > 0) {
     int symbol = Serial.read();
     switch (symbol) {
-      case 'A': serWhich = 0; break;
-      case 'B': serWhich = 1; break;
-      case '0': serState = 0; break;
-      case '1': serState = 1; break;
-      case ';': {
-        bool changed = relays[serWhich].set(serState);
-        Serial.write(changed ? "" : "NOP;");
+      // TODO: Change position numbering to match relay label
+      case 'A': serial_channel = &channels[0]; break;
+      case 'B': serial_channel = &channels[1]; break;
+      case 'C': serial_channel = &channels[2]; break;
+      case '0': serial_position = POS_1; break;
+      case '1': serial_position = POS_2; break;
+      case ';':
+        if (serial_channel == NULL || serial_position == POS_FAULT) {
+          Serial.write("BAD_COMMAND;");
+        } else {
+          bool changed = serial_channel->set(serial_position);
+          Serial.write(changed ? "" : "NOP;");
+        }
         break;
-      }
       default:
-        Serial.write("ERROR;");
+        Serial.write("BAD_CHARACTER;");
     }
   }
 }
