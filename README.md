@@ -1,4 +1,4 @@
-`relay.ino` is Arduino firmware for a computer interface for up to three latching relays.
+`relay-controller.ino` is Arduino firmware for a computer interface for up to three latching relays.
 
 ## Protocol
 
